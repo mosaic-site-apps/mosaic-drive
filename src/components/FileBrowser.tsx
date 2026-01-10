@@ -431,7 +431,7 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
     const [loading, setLoading] = useState(false);
     const [loadingTooLong, setLoadingTooLong] = useState(false);
     const [isFromCache, setIsFromCache] = useState(false);
-    const [isRefreshing, setIsRefreshing] = useState(false);
+    const [_isRefreshing, setIsRefreshing] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
     const [uploading, setUploading] = useState(false);

@@ -5,6 +5,8 @@ Desktop app for S3-compatible cloud storage (MinIO, AWS S3, etc.) built with Tau
 
 **Live service:** https://mosaic.site
 **Repo:** https://github.com/mosaic-site-apps/mosaic-drive
+**GitHub Org:** mosaic-site-apps (for future Mosaic apps)
+**Owner:** roadius2 (Jody Schnarr)
 
 ## Tech Stack
 - **Frontend:** React 18, TypeScript, Tailwind CSS, Vite
@@ -61,9 +63,19 @@ TAURI_SIGNING_PRIVATE_KEY=$(cat ~/.tauri/mosaic-drive.key) npm run tauri build
 2. Upload to GitHub Releases: `.dmg`, `.app.tar.gz`, `.app.tar.gz.sig`, `latest.json`
 
 ## Signing Keys
-- Private key: `~/.tauri/mosaic-drive.key` (NEVER commit)
-- Public key: Configured in `tauri.conf.json`
-- GitHub secret: `TAURI_SIGNING_PRIVATE_KEY` (base64 encoded key contents)
+- Private key: `~/.tauri/mosaic-drive.key` (NEVER commit, no password)
+- Public key: Configured in `tauri.conf.json` under `plugins.updater.pubkey`
+- GitHub secrets (repository secrets, not environment):
+  - `TAURI_SIGNING_PRIVATE_KEY` - contents of the .key file
+  - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` - empty (no password)
+
+### Regenerate Keys (if needed)
+```bash
+npm run tauri signer generate -- -w ~/.tauri/mosaic-drive.key --force
+# Press Enter twice for no password
+# Copy new public key to tauri.conf.json
+# Update GitHub secret with new private key
+```
 
 ## Important Files
 | File | Purpose |

@@ -4972,6 +4972,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tokio",
+ "urlencoding",
  "walkdir",
  "zip 2.4.2",
 ]

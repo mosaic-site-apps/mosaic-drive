@@ -1,10 +1,12 @@
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use crate::s3_client::S3Client;
 use crate::cache::{self, CachedFileObject, ListResult, CacheStatus};
 use keyring::Entry;
 use serde::Serialize;
+use aws_sdk_s3::presigning::PresigningConfig;
 
 pub struct AppState {
     pub client: Mutex<Option<S3Client>>,
@@ -1416,8 +1418,10 @@ pub async fn move_files(
         // Build target key
         let target_key = if target_folder.is_empty() {
             file_name.to_string()
+        } else if target_folder.ends_with('/') {
+            format!("{}{}", target_folder, file_name)
         } else {
-            format!("{}{}", target_folder.trim_end_matches('/'), if target_folder.ends_with('/') { "" } else { "/" }).to_string() + file_name
+            format!("{}/{}", target_folder, file_name)
         };
 
         // Skip if source and target are the same
@@ -1425,8 +1429,9 @@ pub async fn move_files(
             continue;
         }
 
-        // Copy to new location
-        let copy_source = format!("{}/{}", bucket, key);
+        // Copy to new location (URL-encode the key for copy source)
+        let encoded_key = urlencoding::encode(key);
+        let copy_source = format!("/{}/{}", bucket, encoded_key);
         client.client.copy_object()
             .bucket(&bucket)
             .key(&target_key)
@@ -1448,6 +1453,135 @@ pub async fn move_files(
     }
 
     Ok(moved_count)
+}
+
+#[tauri::command]
+pub async fn rename_object(
+    bucket: String,
+    old_key: String,
+    new_name: String,
+    state: State<'_, AppState>
+) -> Result<String, String> {
+    let guard = state.client.lock().await;
+    let client = guard.as_ref().ok_or("Not connected")?;
+
+    // Validate new name
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    if new_name.contains('/') {
+        return Err("Name cannot contain /".to_string());
+    }
+
+    // Build new key by replacing the filename part
+    let is_folder = old_key.ends_with('/');
+    let path_parts: Vec<&str> = old_key.trim_end_matches('/').split('/').collect();
+
+    let new_key = if path_parts.len() > 1 {
+        // Has parent path
+        let parent = path_parts[..path_parts.len()-1].join("/");
+        if is_folder {
+            format!("{}/{}/", parent, new_name)
+        } else {
+            format!("{}/{}", parent, new_name)
+        }
+    } else {
+        // Root level
+        if is_folder {
+            format!("{}/", new_name)
+        } else {
+            new_name.to_string()
+        }
+    };
+
+    // Skip if name didn't change
+    if old_key == new_key {
+        return Ok(new_key);
+    }
+
+    if is_folder {
+        // For folders, we need to rename all objects with this prefix
+        let mut continuation_token = None;
+        let mut keys_to_rename: Vec<String> = Vec::new();
+
+        // List all objects under this folder
+        loop {
+            let resp = client.client.list_objects_v2()
+                .bucket(&bucket)
+                .prefix(&old_key)
+                .set_continuation_token(continuation_token)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            if let Some(contents) = resp.contents {
+                for obj in contents {
+                    if let Some(key) = obj.key {
+                        keys_to_rename.push(key);
+                    }
+                }
+            }
+
+            if resp.is_truncated.unwrap_or(false) {
+                continuation_token = resp.next_continuation_token;
+            } else {
+                break;
+            }
+        }
+
+        // Rename each object
+        for key in keys_to_rename {
+            let new_obj_key = key.replacen(&old_key, &new_key, 1);
+            // URL-encode the key for the copy source (S3 requirement)
+            let encoded_key = urlencoding::encode(&key);
+            let copy_source = format!("{}/{}", bucket, encoded_key);
+
+            client.client.copy_object()
+                .bucket(&bucket)
+                .key(&new_obj_key)
+                .copy_source(&copy_source)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to copy {}: {}", key, e))?;
+
+            client.client.delete_object()
+                .bucket(&bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to delete {}: {}", key, e))?;
+        }
+    } else {
+        // Single file rename - use copy + delete
+        // Format: /bucket/key (URL-encoded key)
+        let encoded_key = urlencoding::encode(&old_key);
+        let copy_source = format!("/{}/{}", bucket, encoded_key);
+
+        println!("DEBUG rename: old_key={}, new_key={}, copy_source={}", old_key, new_key, copy_source);
+
+        let copy_result = client.client.copy_object()
+            .bucket(&bucket)
+            .key(&new_key)
+            .copy_source(&copy_source)
+            .send()
+            .await;
+
+        if let Err(e) = &copy_result {
+            println!("DEBUG rename copy error: {:?}", e);
+            return Err(format!("Failed to copy: {}", e));
+        }
+
+        client.client.delete_object()
+            .bucket(&bucket)
+            .key(&old_key)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to delete original: {}", e))?;
+    }
+
+    println!("DEBUG: Renamed {} to {}", old_key, new_key);
+    Ok(new_key)
 }
 
 #[derive(Clone, Serialize)]
@@ -1510,4 +1644,29 @@ pub async fn get_storage_stats(
         total_bytes: 0,
         object_count,
     })
+}
+
+#[tauri::command]
+pub async fn get_presigned_url(
+    bucket: String,
+    key: String,
+    expires_in_secs: Option<u64>,
+    state: State<'_, AppState>
+) -> Result<String, String> {
+    let guard = state.client.lock().await;
+    let client = guard.as_ref().ok_or("Not connected")?;
+
+    let expires_in = Duration::from_secs(expires_in_secs.unwrap_or(3600)); // Default 1 hour
+    let presigning_config = PresigningConfig::expires_in(expires_in)
+        .map_err(|e| e.to_string())?;
+
+    let presigned_request = client.client
+        .get_object()
+        .bucket(&bucket)
+        .key(&key)
+        .presigned(presigning_config)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(presigned_request.uri().to_string())
 }

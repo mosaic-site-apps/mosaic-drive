@@ -1,11 +1,12 @@
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { flushSync } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { cn } from "../lib/cn";
+import { FilePreview } from "./FilePreview";
 import {
     Folder,
     File as FileIcon,
@@ -27,7 +28,8 @@ import {
     X,
     Trash,
     List,
-    Columns
+    Columns,
+    FileText
 } from "lucide-react";
 
 interface FileObject {
@@ -112,13 +114,16 @@ interface ColumnViewProps {
     formatSize: (bytes: number) => string;
     // Drag and drop props
     draggedFiles: string[];
+    draggedFilesRef: React.RefObject<string[]>;
     setDraggedFiles: (files: string[]) => void;
     dropTargetFolder: string | null;
-    setDropTargetFolder: (folder: string | null) => void;
+    onDragEnterFolder: (folderKey: string) => void;
+    onDragLeaveFolder: (folderKey: string) => void;
+    resetDragCounters: () => void;
     onMoveFiles: (keys: string[], targetFolder: string) => void;
 }
 
-function ColumnView({ bucket, initialPath, isTrashView, isDragOver, onNavigate, onDownload, onDelete, formatDate, formatSize, draggedFiles, setDraggedFiles, dropTargetFolder, setDropTargetFolder, onMoveFiles }: ColumnViewProps) {
+function ColumnView({ bucket, initialPath, isTrashView, isDragOver, onNavigate, onDownload, onDelete, formatDate, formatSize, draggedFiles, draggedFilesRef, setDraggedFiles, dropTargetFolder, onDragEnterFolder, onDragLeaveFolder, resetDragCounters, onMoveFiles }: ColumnViewProps) {
     const [columns, setColumns] = useState<ColumnData[]>([]);
     const [selectedFile, setSelectedFile] = useState<FileObject | null>(null);
     const scrollContainerRef = React.useRef<HTMLDivElement>(null);
@@ -258,8 +263,8 @@ function ColumnView({ bucket, initialPath, isTrashView, isDragOver, onNavigate, 
 
     return (
         <div ref={scrollContainerRef} className="flex h-full overflow-x-auto relative">
-            {/* Drop Zone Overlay for Column View */}
-            {isDragOver && (
+            {/* Drop Zone Overlay for Column View - only show for external uploads, not internal moves */}
+            {isDragOver && draggedFiles.length === 0 && (
                 <div className="absolute inset-0 z-50 bg-blue-500/10 border-2 border-dashed border-blue-500 rounded-lg m-2 flex items-center justify-center pointer-events-none">
                     <div className="text-center">
                         <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-blue-100 flex items-center justify-center">
@@ -306,39 +311,36 @@ function ColumnView({ bucket, initialPath, isTrashView, isDragOver, onNavigate, 
                                         }}
                                         onDragEnd={() => {
                                             setDraggedFiles([]);
-                                            setDropTargetFolder(null);
+                                            resetDragCounters();
                                         }}
                                         onDragOver={(e) => {
-                                            if (isFolder && draggedFiles.length > 0) {
+                                            if (isFolder && draggedFilesRef.current && draggedFilesRef.current.length > 0) {
                                                 e.preventDefault();
                                                 e.stopPropagation();
                                                 e.dataTransfer.dropEffect = 'move';
                                             }
                                         }}
                                         onDragEnter={(e) => {
-                                            if (isFolder && draggedFiles.length > 0) {
+                                            if (isFolder && draggedFilesRef.current && draggedFilesRef.current.length > 0) {
                                                 e.preventDefault();
                                                 e.stopPropagation();
-                                                setDropTargetFolder(file.key);
+                                                onDragEnterFolder(file.key);
                                             }
                                         }}
                                         onDragLeave={(e) => {
-                                            if (isFolder && dropTargetFolder === file.key) {
+                                            if (isFolder && draggedFilesRef.current && draggedFilesRef.current.length > 0) {
                                                 e.stopPropagation();
-                                                const relatedTarget = e.relatedTarget as HTMLElement;
-                                                if (!e.currentTarget.contains(relatedTarget)) {
-                                                    setDropTargetFolder(null);
-                                                }
+                                                onDragLeaveFolder(file.key);
                                             }
                                         }}
                                         onDrop={(e) => {
                                             e.preventDefault();
                                             e.stopPropagation();
-                                            if (isFolder && draggedFiles.length > 0) {
-                                                onMoveFiles(draggedFiles, file.key);
+                                            if (isFolder && draggedFilesRef.current && draggedFilesRef.current.length > 0) {
+                                                onMoveFiles(draggedFilesRef.current, file.key);
                                             }
                                             setDraggedFiles([]);
-                                            setDropTargetFolder(null);
+                                            resetDragCounters();
                                         }}
                                         onClick={() => handleItemClick(file, colIndex)}
                                         onDoubleClick={(e) => {
@@ -349,10 +351,10 @@ function ColumnView({ bucket, initialPath, isTrashView, isDragOver, onNavigate, 
                                         }}
                                         className={cn(
                                             "flex items-center gap-2 px-3 py-1 cursor-pointer transition-colors select-none",
-                                            isSelected
+                                            isSelected && !isDragTarget
                                                 ? "bg-blue-500 text-white"
-                                                : "hover:bg-gray-100",
-                                            isDragTarget && "bg-green-100 ring-2 ring-green-400 ring-inset",
+                                                : !isDragTarget && "hover:bg-gray-100",
+                                            isDragTarget && "!bg-green-200 ring-2 ring-green-500 text-green-800",
                                             isBeingDragged && "opacity-50"
                                         )}
                                     >
@@ -377,10 +379,16 @@ function ColumnView({ bucket, initialPath, isTrashView, isDragOver, onNavigate, 
 
             {/* Preview/Details column */}
             {selectedFile && !selectedFile.is_dir && (
-                <div className="min-w-[280px] flex-1 bg-gray-50 p-6 overflow-y-auto flex-shrink-0">
+                <div className="min-w-[280px] max-w-[320px] flex-1 bg-gray-50 p-4 overflow-y-auto flex-shrink-0">
                     <div className="flex flex-col items-center text-center">
-                        <div className="w-20 h-20 bg-white rounded-xl shadow-sm flex items-center justify-center mb-4">
-                            <FileIcon className="w-10 h-10 text-gray-300" />
+                        {/* File Preview */}
+                        <div className="w-full mb-4">
+                            <FilePreview
+                                bucket={bucket}
+                                fileKey={selectedFile.key}
+                                fileName={getFileName(selectedFile.key)}
+                                fileSize={selectedFile.size}
+                            />
                         </div>
                         <h3 className="font-semibold text-gray-900 mb-1 break-all text-sm">
                             {getFileName(selectedFile.key)}
@@ -510,7 +518,42 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
 
     // Internal drag & drop state (moving files within app)
     const [draggedFiles, setDraggedFiles] = useState<string[]>([]);
+    const draggedFilesRef = useRef<string[]>([]); // Ref for immediate access during drag events
     const [dropTargetFolder, setDropTargetFolder] = useState<string | null>(null);
+    // Counter-based approach to fix dragenter/dragleave firing on nested elements
+    const dragEnterCounterRef = useRef<Map<string, number>>(new Map());
+
+    // Wrapper to update both state and ref
+    const updateDraggedFiles = (files: string[]) => {
+        draggedFilesRef.current = files;
+        setDraggedFiles(files);
+    };
+
+    // Reset drag counters (call on drop or drag end)
+    const resetDragCounters = () => {
+        dragEnterCounterRef.current.clear();
+        setDropTargetFolder(null);
+    };
+
+    // Handle drag enter with counter
+    const handleDragEnterFolder = (folderKey: string) => {
+        const counter = dragEnterCounterRef.current.get(folderKey) || 0;
+        dragEnterCounterRef.current.set(folderKey, counter + 1);
+        if (counter === 0) {
+            setDropTargetFolder(folderKey);
+        }
+    };
+
+    // Handle drag leave with counter
+    const handleDragLeaveFolder = (folderKey: string) => {
+        const counter = dragEnterCounterRef.current.get(folderKey) || 0;
+        if (counter > 0) {
+            dragEnterCounterRef.current.set(folderKey, counter - 1);
+            if (counter - 1 === 0) {
+                setDropTargetFolder(null);
+            }
+        }
+    };
 
     // Trash State
     const [isTrashView, setIsTrashView] = useState(false);
@@ -519,7 +562,15 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
     // New Folder Dialog State
     const [showNewFolderDialog, setShowNewFolderDialog] = useState(false);
     const [newFolderName, setNewFolderName] = useState("");
+    const [showRenameDialog, setShowRenameDialog] = useState(false);
+    const [renameTarget, setRenameTarget] = useState<FileObject | null>(null);
+    const [renameName, setRenameName] = useState("");
     const [newFolderAtRoot, setNewFolderAtRoot] = useState(false);
+
+    // Move To Dialog State
+    const [showMoveDialog, setShowMoveDialog] = useState(false);
+    const [moveTargets, setMoveTargets] = useState<string[]>([]);
+    const [movingStatus, setMovingStatus] = useState<string | null>(null); // Shows "Moving to X..." banner
 
     // View Mode State: 'list' or 'column'
     type ViewMode = 'list' | 'column';
@@ -1068,6 +1119,87 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
         }
     };
 
+    const openRenameDialog = (file: FileObject) => {
+        const fileName = file.key.split('/').filter(Boolean).pop() || '';
+        setRenameTarget(file);
+        setRenameName(fileName);
+        setShowRenameDialog(true);
+    };
+
+    const handleRename = async () => {
+        if (!renameTarget || !renameName.trim()) return;
+
+        try {
+            await invoke("rename_object", {
+                bucket: initialBucket,
+                oldKey: renameTarget.key,
+                newName: renameName.trim()
+            });
+
+            setShowRenameDialog(false);
+            setRenameTarget(null);
+            setRenameName("");
+
+            // Invalidate cache and refresh files
+            await invoke("invalidate_cache", { bucket: initialBucket, prefix: currentPath });
+            loadFiles(initialBucket, currentPath);
+            loadRootFolders();
+
+            setSuccessMessage(`Renamed to "${renameName.trim()}"`);
+            setTimeout(() => setSuccessMessage(null), 3000);
+        } catch (err: any) {
+            setError("Failed to rename: " + err.toString());
+        }
+    };
+
+    // Open the Move To dialog with selected files
+    const openMoveDialog = () => {
+        // Don't open if a move is already in progress
+        if (movingStatus) {
+            setError("Please wait for the current move to complete");
+            setTimeout(() => setError(null), 3000);
+            return;
+        }
+        const targets = selectedFiles.size > 0
+            ? Array.from(selectedFiles)
+            : [];
+        if (targets.length === 0) return;
+        setMoveTargets(targets);
+        setShowMoveDialog(true);
+    };
+
+    // Handle moving files to a destination folder (background operation)
+    const handleMoveTo = async (destinationFolder: string) => {
+        if (moveTargets.length === 0 || movingStatus) return;
+
+        const targets = [...moveTargets];
+        const folderName = destinationFolder.split('/').filter(Boolean).pop() || 'Root';
+        const fileCount = targets.length;
+
+        // Close dialog immediately
+        setShowMoveDialog(false);
+        setMoveTargets([]);
+
+        // Show status banner
+        setMovingStatus(`Moving ${fileCount} ${fileCount === 1 ? 'item' : 'items'} to ${folderName}...`);
+
+        try {
+            await handleMoveFiles(targets, destinationFolder);
+            // Invalidate cache for source and destination folders
+            await invoke("invalidate_cache", { bucket: initialBucket, prefix: currentPath });
+            await invoke("invalidate_cache", { bucket: initialBucket, prefix: destinationFolder });
+            // Refresh the file list
+            loadFiles(initialBucket, currentPath);
+            // Show success message
+            setSuccessMessage(`Moved ${fileCount} ${fileCount === 1 ? 'item' : 'items'} to ${folderName}`);
+            setTimeout(() => setSuccessMessage(null), 3000);
+        } catch (err: any) {
+            setError("Move failed: " + err.toString());
+        } finally {
+            setMovingStatus(null);
+        }
+    };
+
     const handleContextMenu = (e: React.MouseEvent) => {
         e.preventDefault();
         setContextMenu({ x: e.clientX, y: e.clientY, visible: true });
@@ -1247,7 +1379,7 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
             });
 
             setSelectedFiles(new Set());
-            setDraggedFiles([]);
+            updateDraggedFiles([]);
             loadFiles(initialBucket, currentPath);
 
             const folderName = targetFolder.split('/').filter(Boolean).pop() || 'root';
@@ -1496,46 +1628,43 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
                                 key={folderName}
                                 onClick={() => navigateToFolder(fullPath)}
                                 onDragOver={(e) => {
-                                    if (draggedFiles.length > 0) {
+                                    if (draggedFilesRef.current.length > 0) {
                                         e.preventDefault();
                                         e.stopPropagation();
                                         e.dataTransfer.dropEffect = 'move';
                                     }
                                 }}
                                 onDragEnter={(e) => {
-                                    if (draggedFiles.length > 0) {
+                                    if (draggedFilesRef.current.length > 0) {
                                         e.preventDefault();
                                         e.stopPropagation();
-                                        setDropTargetFolder(fullPath);
+                                        handleDragEnterFolder(fullPath);
                                     }
                                 }}
                                 onDragLeave={(e) => {
-                                    if (dropTargetFolder === fullPath) {
+                                    if (draggedFilesRef.current.length > 0) {
                                         e.stopPropagation();
-                                        const relatedTarget = e.relatedTarget as HTMLElement;
-                                        if (!e.currentTarget.contains(relatedTarget)) {
-                                            setDropTargetFolder(null);
-                                        }
+                                        handleDragLeaveFolder(fullPath);
                                     }
                                 }}
                                 onDrop={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
-                                    if (draggedFiles.length > 0) {
-                                        handleMoveFiles(draggedFiles, fullPath);
+                                    if (draggedFilesRef.current.length > 0) {
+                                        handleMoveFiles(draggedFilesRef.current, fullPath);
                                     }
-                                    setDraggedFiles([]);
-                                    setDropTargetFolder(null);
+                                    updateDraggedFiles([]);
+                                    resetDragCounters();
                                 }}
                                 className={cn(
                                     "w-full text-left px-3 py-2 rounded-md flex items-center gap-3 text-[13px] font-medium transition-colors",
-                                    isActive
+                                    isActive && !isSidebarDropTarget
                                         ? "bg-blue-100/50 text-blue-600"
-                                        : "text-gray-600 hover:bg-gray-100 hover:text-gray-900",
-                                    isSidebarDropTarget && "bg-green-100 ring-2 ring-green-400 ring-inset"
+                                        : !isSidebarDropTarget && "text-gray-600 hover:bg-gray-100 hover:text-gray-900",
+                                    isSidebarDropTarget && "!bg-green-200 ring-2 ring-green-500 text-green-800"
                                 )}
                             >
-                                <Folder className={cn("w-4 h-4 fill-current", isActive ? "text-blue-500" : "text-gray-400")} />
+                                <Folder className={cn("w-4 h-4 fill-current", isSidebarDropTarget ? "text-green-600" : isActive ? "text-blue-500" : "text-gray-400")} />
                                 <span className="truncate">{folderName}</span>
                             </button>
                         );
@@ -1682,8 +1811,8 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
                     className="flex-1 overflow-y-auto overflow-x-hidden relative"
                     onContextMenu={handleContextMenu}
                 >
-                    {/* Drop Zone Overlay */}
-                    {isDragOver && (
+                    {/* Drop Zone Overlay - only show in list view for external uploads, not internal moves */}
+                    {isDragOver && viewMode === 'list' && draggedFiles.length === 0 && (
                         <div className="absolute inset-0 z-50 bg-blue-500/10 border-2 border-dashed border-blue-500 rounded-lg m-4 flex items-center justify-center pointer-events-none">
                             <div className="text-center">
                                 <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-blue-100 flex items-center justify-center">
@@ -1722,6 +1851,12 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
                         <div className="m-4 p-4 bg-green-50 border border-green-100 rounded-lg text-green-600 text-sm flex justify-between items-center">
                             <span>{successMessage}</span>
                             <button onClick={() => setSuccessMessage(null)} className="text-green-400 hover:text-green-600">✕</button>
+                        </div>
+                    )}
+                    {movingStatus && (
+                        <div className="m-4 p-4 bg-indigo-50 border border-indigo-200 rounded-lg text-sm flex items-center gap-3">
+                            <Loader2 className="w-4 h-4 text-indigo-600 animate-spin" />
+                            <span className="text-indigo-700">{movingStatus}</span>
                         </div>
                     )}
 
@@ -2100,7 +2235,7 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
                                                         setSelectedFiles(new Set([file.key]));
                                                     }
                                                 }
-                                                setDraggedFiles(filesToDrag);
+                                                updateDraggedFiles(filesToDrag);
                                                 e.dataTransfer.effectAllowed = 'move';
                                                 // Use custom type to prevent Finder from creating text clippings
                                                 e.dataTransfer.setData('application/x-mosaic-files', JSON.stringify(filesToDrag));
@@ -2115,42 +2250,38 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
                                                 }
                                             }}
                                             onDragEnd={() => {
-                                                setDraggedFiles([]);
-                                                setDropTargetFolder(null);
+                                                updateDraggedFiles([]);
+                                                resetDragCounters();
                                             }}
                                             onDragOver={(e) => {
                                                 // Must preventDefault to allow drop
-                                                if (displayAsFolder && draggedFiles.length > 0) {
+                                                if (displayAsFolder && draggedFilesRef.current.length > 0) {
                                                     e.preventDefault();
                                                     e.stopPropagation();
                                                     e.dataTransfer.dropEffect = 'move';
                                                 }
                                             }}
                                             onDragEnter={(e) => {
-                                                if (displayAsFolder && draggedFiles.length > 0) {
+                                                if (displayAsFolder && draggedFilesRef.current.length > 0) {
                                                     e.preventDefault();
                                                     e.stopPropagation();
-                                                    setDropTargetFolder(file.key);
+                                                    handleDragEnterFolder(file.key);
                                                 }
                                             }}
                                             onDragLeave={(e) => {
-                                                if (displayAsFolder && dropTargetFolder === file.key) {
+                                                if (displayAsFolder && draggedFilesRef.current.length > 0) {
                                                     e.stopPropagation();
-                                                    // Only clear if actually leaving the element
-                                                    const relatedTarget = e.relatedTarget as HTMLElement;
-                                                    if (!e.currentTarget.contains(relatedTarget)) {
-                                                        setDropTargetFolder(null);
-                                                    }
+                                                    handleDragLeaveFolder(file.key);
                                                 }
                                             }}
                                             onDrop={(e) => {
                                                 e.preventDefault();
                                                 e.stopPropagation();
-                                                if (displayAsFolder && draggedFiles.length > 0) {
-                                                    handleMoveFiles(draggedFiles, file.key);
+                                                if (displayAsFolder && draggedFilesRef.current.length > 0) {
+                                                    handleMoveFiles(draggedFilesRef.current, file.key);
                                                 }
-                                                setDraggedFiles([]);
-                                                setDropTargetFolder(null);
+                                                updateDraggedFiles([]);
+                                                resetDragCounters();
                                             }}
                                             onClick={(e) => handleFileClick(e, file, index, visibleFiles)}
                                             onDoubleClick={(e) => {
@@ -2171,10 +2302,10 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
                                             }}
                                             className={cn(
                                                 "group relative grid grid-cols-12 gap-4 px-4 py-0.5 cursor-pointer transition-colors items-center text-sm select-none",
-                                                isSelected
+                                                isSelected && !isDragTarget
                                                     ? "bg-blue-100 hover:bg-blue-150"
-                                                    : "hover:bg-blue-50/50",
-                                                isDragTarget && "bg-green-100 ring-2 ring-green-400 ring-inset",
+                                                    : !isDragTarget && "hover:bg-blue-50/50",
+                                                isDragTarget && "!bg-green-200 ring-2 ring-green-500",
                                                 isBeingDragged && "opacity-50"
                                             )}
                                         >
@@ -2213,9 +2344,27 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
                                     style={{ top: contextMenu.y, left: contextMenu.x }}
                                     onClick={(e) => e.stopPropagation()}
                                 >
+                                    {/* New Folder - always at top */}
+                                    <button
+                                        onClick={() => { openNewFolderDialog(false); setContextMenu(null); }}
+                                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2"
+                                    >
+                                        <FolderPlus className="w-4 h-4" />
+                                        New Folder
+                                    </button>
                                     {/* Multi-select actions */}
                                     {selectedFiles.size > 1 && !isTrashView && (
                                         <>
+                                            <button
+                                                onClick={() => {
+                                                    setContextMenu(null);
+                                                    openMoveDialog();
+                                                }}
+                                                className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2"
+                                            >
+                                                <Folder className="w-4 h-4" />
+                                                Move to...
+                                            </button>
                                             <button
                                                 onClick={() => {
                                                     setContextMenu(null);
@@ -2236,12 +2385,38 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
                                                 <Trash2 className="w-4 h-4" />
                                                 Trash {selectedFiles.size} files
                                             </button>
-                                            <div className="border-t border-gray-100 my-1" />
                                         </>
                                     )}
                                     {/* Single file actions */}
                                     {contextMenu.file && selectedFiles.size <= 1 && !isTrashView && (
                                         <>
+                                            <button
+                                                onClick={() => {
+                                                    // Select this file if not already selected
+                                                    if (contextMenu.file && !selectedFiles.has(contextMenu.file.key)) {
+                                                        setSelectedFiles(new Set([contextMenu.file.key]));
+                                                    }
+                                                    setContextMenu(null);
+                                                    // Small delay to ensure selection is updated
+                                                    setTimeout(() => openMoveDialog(), 10);
+                                                }}
+                                                className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2"
+                                            >
+                                                <Folder className="w-4 h-4" />
+                                                Move to...
+                                            </button>
+                                            <button
+                                                onClick={() => {
+                                                    if (contextMenu.file) {
+                                                        openRenameDialog(contextMenu.file);
+                                                    }
+                                                    setContextMenu(null);
+                                                }}
+                                                className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2"
+                                            >
+                                                <FileText className="w-4 h-4" />
+                                                Rename
+                                            </button>
                                             <button
                                                 onClick={() => {
                                                     const file = contextMenu.file;
@@ -2267,16 +2442,8 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
                                                 <Trash2 className="w-4 h-4" />
                                                 Move to Trash
                                             </button>
-                                            <div className="border-t border-gray-100 my-1" />
                                         </>
                                     )}
-                                    <button
-                                        onClick={() => { openNewFolderDialog(false); setContextMenu(null); }}
-                                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2"
-                                    >
-                                        <FolderPlus className="w-4 h-4" />
-                                        New Folder
-                                    </button>
                                 </div>
                             </>
                         )}
@@ -2294,9 +2461,12 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
                                 formatDate={formatDate}
                                 formatSize={formatSize}
                                 draggedFiles={draggedFiles}
-                                setDraggedFiles={setDraggedFiles}
+                                draggedFilesRef={draggedFilesRef}
+                                setDraggedFiles={updateDraggedFiles}
                                 dropTargetFolder={dropTargetFolder}
-                                setDropTargetFolder={setDropTargetFolder}
+                                onDragEnterFolder={handleDragEnterFolder}
+                                onDragLeaveFolder={handleDragLeaveFolder}
+                                resetDragCounters={resetDragCounters}
                                 onMoveFiles={handleMoveFiles}
                             />
                         );
@@ -2377,6 +2547,137 @@ export function FileBrowser({ initialBucket }: FileBrowserProps) {
                                 className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                                 Create
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Rename Dialog */}
+            {showRenameDialog && renameTarget && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center">
+                    <div
+                        className="absolute inset-0 bg-black/20 backdrop-blur-sm"
+                        onClick={() => setShowRenameDialog(false)}
+                    />
+                    <div className="relative bg-white rounded-xl shadow-2xl p-6 w-80">
+                        <h3 className="text-lg font-semibold text-gray-900 mb-4">
+                            Rename {renameTarget.is_dir ? "Folder" : "File"}
+                        </h3>
+                        <input
+                            type="text"
+                            value={renameName}
+                            onChange={(e) => setRenameName(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleRename();
+                                if (e.key === 'Escape') setShowRenameDialog(false);
+                            }}
+                            placeholder="New name"
+                            className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-sm"
+                            autoFocus
+                            onFocus={(e) => {
+                                // Select filename without extension for files
+                                if (!renameTarget.is_dir) {
+                                    const lastDot = renameName.lastIndexOf('.');
+                                    if (lastDot > 0) {
+                                        e.target.setSelectionRange(0, lastDot);
+                                    } else {
+                                        e.target.select();
+                                    }
+                                } else {
+                                    e.target.select();
+                                }
+                            }}
+                        />
+                        <div className="flex justify-end gap-2 mt-4">
+                            <button
+                                onClick={() => setShowRenameDialog(false)}
+                                className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleRename}
+                                disabled={!renameName.trim()}
+                                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                Rename
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Move To Dialog */}
+            {showMoveDialog && moveTargets.length > 0 && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center">
+                    <div
+                        className="absolute inset-0 bg-black/20 backdrop-blur-sm"
+                        onClick={() => !movingStatus && setShowMoveDialog(false)}
+                    />
+                    <div className="relative bg-white rounded-xl shadow-2xl p-6 w-80 max-h-[70vh] flex flex-col">
+                        <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                            Move {moveTargets.length === 1 ? "Item" : `${moveTargets.length} Items`}
+                        </h3>
+                        <p className="text-xs text-gray-500 mb-4">Select destination folder</p>
+                        <div className="flex-1 overflow-y-auto space-y-1 min-h-0 max-h-64">
+                            {/* Root option */}
+                            {currentPath !== "" && (
+                                <button
+                                    onClick={() => handleMoveTo("")}
+                                    disabled={!!movingStatus}
+                                    className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    <Folder className="w-4 h-4 text-gray-400" />
+                                    <span className="text-gray-500 italic">Root</span>
+                                </button>
+                            )}
+                            {/* Root folders */}
+                            {rootFolders.map((folder) => {
+                                const folderPath = folder + "/";
+                                // Don't show current folder or folders being moved
+                                if (folderPath === currentPath) return null;
+                                if (moveTargets.some(t => t === folderPath || t.startsWith(folderPath))) return null;
+                                return (
+                                    <button
+                                        key={folder}
+                                        onClick={() => handleMoveTo(folderPath)}
+                                        disabled={!!movingStatus}
+                                        className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        <Folder className="w-4 h-4 text-blue-500 fill-blue-500/20" />
+                                        {folder}
+                                    </button>
+                                );
+                            })}
+                            {/* Subfolders in current view */}
+                            {files
+                                .filter(f => f.is_dir && !f.key.startsWith('.Trash'))
+                                .filter(f => !moveTargets.includes(f.key))
+                                .map((folder) => {
+                                    const folderName = folder.key.split('/').filter(Boolean).pop() || folder.key;
+                                    // Skip if it's already a root folder
+                                    if (rootFolders.includes(folderName) && folder.key === folderName + "/") return null;
+                                    return (
+                                        <button
+                                            key={folder.key}
+                                            onClick={() => handleMoveTo(folder.key)}
+                                            disabled={!!movingStatus}
+                                            className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            <Folder className="w-4 h-4 text-blue-500 fill-blue-500/20" />
+                                            {currentPath ? `${currentPath}${folderName}` : folderName}
+                                        </button>
+                                    );
+                                })}
+                        </div>
+                        <div className="flex justify-end gap-2 mt-4 pt-4 border-t border-gray-100">
+                            <button
+                                onClick={() => setShowMoveDialog(false)}
+                                disabled={!!movingStatus}
+                                className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                Cancel
                             </button>
                         </div>
                     </div>

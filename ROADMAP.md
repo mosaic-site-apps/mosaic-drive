@@ -16,22 +16,26 @@
 - [x] Folder download as ZIP with save dialog
 - [x] Right-click context menu (Download, Trash, New Folder)
 
-## v0.2.0 (Current) - Released
+## v0.2.0 - Released
 - [x] Multi-select files (Shift+Click for range, Cmd+Click for toggle)
 - [x] Bulk delete selected files
 - [x] Bulk download selected files (with folder picker)
 - [x] Search functionality (filter/find files)
 - [x] Auto-updater (via GitHub Releases)
 
-## v0.3.0
-- [ ] Universal binary (Intel + Apple Silicon)
-- [ ] File preview in column view:
-  - Images (native img tag with blob URL)
-  - PDFs (react-pdf or @react-pdf-viewer/core)
-  - Videos/Audio (native HTML5)
-  - Documents (react-doc-viewer for docx, xlsx, etc.)
-- [ ] File/folder renaming
-- [ ] Context menu (right-click) actions
+## v0.3.0 (Current) - Released
+- [x] File preview in column view (images, PDFs, video, audio + type icons)
+- [x] File/folder renaming
+- [x] Context menu "Move to..." action (select destination folder)
+
+## v0.4.0 - Finder Integration
+- [ ] File Provider Extension (macOS native cloud storage API)
+- [ ] Mosaic Drive appears in Finder sidebar
+- [ ] On-demand file access (download when opened, saves disk space)
+- [ ] Cloud status badges (downloaded, cloud-only, syncing)
+- [ ] Settings toggle to enable/disable Finder integration
+- [ ] Automatic cleanup of cached files (configurable)
+- [ ] Sync other local directories to Mosaic Drive (selective folder backup)
 
 ## v0.5.0 - AI Assistant
 - [ ] "Chat" button in sidebar (above Trash) with AI sparkle icon
@@ -40,7 +44,14 @@
 - [ ] Natural language queries to locate files
 - [ ] "Coming Soon" placeholder until ready
 
+### AI Architecture Notes
+- **Hybrid approach:** Mosaic GPU for file indexing/graphing, user's local LLM for file operations
+- **Local LLM:** Small custom model optimized for file tasks
+- **Hardware-aware:** Adapt to user's RAM and Apple Silicon tier (M1/M2/M3/M4)
+- **Privacy-first:** File analysis happens on-device, not in cloud
+
 ## Future / Nice to Have
+- [ ] Drag-drop to move files (Tauri WebView limitation - events don't fire)
 - [ ] Drag-out to Finder (download on drag)
 - [ ] File tagging
 - [ ] Favorites/bookmarks
@@ -61,12 +72,8 @@
 # Development
 npm run tauri dev
 
-# Production build (Apple Silicon)
+# Production build (Apple Silicon only)
 npm run tauri build
-
-# Universal build (Intel + Apple Silicon)
-rustup target add x86_64-apple-darwin
-npm run tauri build -- --target universal-apple-darwin
 ```
 
 ### Server

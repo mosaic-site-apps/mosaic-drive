@@ -59,7 +59,9 @@ pub fn run() {
             commands::download_files_as_zip,
             commands::download_files_to_folder,
             commands::move_files,
-            commands::get_storage_stats
+            commands::rename_object,
+            commands::get_storage_stats,
+            commands::get_presigned_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

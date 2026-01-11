@@ -42,7 +42,7 @@ npm run tauri dev
 npm run tauri build
 
 # Build (signed, for release)
-TAURI_SIGNING_PRIVATE_KEY=$(cat ~/.tauri/mosaic-drive.key) npm run tauri build
+TAURI_SIGNING_PRIVATE_KEY=$(cat ~/.tauri/mosaic-drive.key) TAURI_SIGNING_PRIVATE_KEY_PASSWORD="yourpassword" npm run tauri build
 ```
 
 ## Releasing Updates
@@ -63,18 +63,18 @@ TAURI_SIGNING_PRIVATE_KEY=$(cat ~/.tauri/mosaic-drive.key) npm run tauri build
 2. Upload to GitHub Releases: `.dmg`, `.app.tar.gz`, `.app.tar.gz.sig`, `latest.json`
 
 ## Signing Keys
-- Private key: `~/.tauri/mosaic-drive.key` (NEVER commit, no password)
+- Private key: `~/.tauri/mosaic-drive.key` (NEVER commit)
 - Public key: Configured in `tauri.conf.json` under `plugins.updater.pubkey`
 - GitHub secrets (repository secrets, not environment):
   - `TAURI_SIGNING_PRIVATE_KEY` - contents of the .key file
-  - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` - empty (no password)
+  - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` - the key password
 
 ### Regenerate Keys (if needed)
 ```bash
 npm run tauri signer generate -- -w ~/.tauri/mosaic-drive.key --force
-# Press Enter twice for no password
+# Enter a password when prompted (required - empty passwords don't work reliably)
 # Copy new public key to tauri.conf.json
-# Update GitHub secret with new private key
+# Update both GitHub secrets (key and password)
 ```
 
 ## Important Files

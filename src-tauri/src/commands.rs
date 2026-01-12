@@ -8,6 +8,40 @@ use keyring::Entry;
 use serde::Serialize;
 use aws_sdk_s3::presigning::PresigningConfig;
 
+// Security: Input validation for S3 bucket and key names
+fn validate_bucket_name(bucket: &str) -> Result<(), String> {
+    if bucket.is_empty() {
+        return Err("Bucket name cannot be empty".to_string());
+    }
+    if bucket.len() < 3 || bucket.len() > 63 {
+        return Err("Bucket name must be 3-63 characters".to_string());
+    }
+    // AWS bucket naming rules: lowercase letters, numbers, hyphens
+    if !bucket.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.') {
+        return Err("Bucket name contains invalid characters".to_string());
+    }
+    if bucket.starts_with('-') || bucket.ends_with('-') {
+        return Err("Bucket name cannot start or end with hyphen".to_string());
+    }
+    Ok(())
+}
+
+fn validate_s3_key(key: &str) -> Result<(), String> {
+    // S3 key max length is 1024 bytes
+    if key.len() > 1024 {
+        return Err("Key name too long (max 1024 characters)".to_string());
+    }
+    // No null bytes allowed
+    if key.contains('\0') {
+        return Err("Key name contains invalid characters".to_string());
+    }
+    // Prevent directory traversal attempts in keys
+    if key.contains("..") {
+        return Err("Key name contains invalid path sequence".to_string());
+    }
+    Ok(())
+}
+
 pub struct AppState {
     pub client: Mutex<Option<S3Client>>,
     pub cancel_upload: AtomicBool,
@@ -85,6 +119,10 @@ pub async fn list_buckets(state: State<'_, AppState>) -> Result<Vec<String>, Str
 
 #[tauri::command]
 pub async fn list_objects(bucket: String, prefix: String, state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    // Security: Validate inputs
+    validate_bucket_name(&bucket)?;
+    validate_s3_key(&prefix)?;
+
     let start = std::time::Instant::now();
     let guard = state.client.lock().await;
     let lock_time = start.elapsed();
@@ -168,6 +206,10 @@ pub async fn list_objects_cached(
     app: AppHandle,
     state: State<'_, AppState>
 ) -> Result<ListResult, String> {
+    // Security: Validate inputs
+    validate_bucket_name(&bucket)?;
+    validate_s3_key(&prefix)?;
+
     let start = std::time::Instant::now();
 
     // Check cache status (synchronous call)
@@ -415,6 +457,30 @@ pub async fn upload_file(
     app: AppHandle,
     state: State<'_, AppState>
 ) -> Result<(), String> {
+    // Security: Validate bucket and key names
+    validate_bucket_name(&bucket)?;
+    validate_s3_key(&target_key)?;
+
+    // Security: Validate and canonicalize the file path
+    let path = std::path::Path::new(&file_path);
+
+    // Check path exists
+    if !path.exists() {
+        return Err("File does not exist".to_string());
+    }
+
+    // Canonicalize to resolve symlinks and prevent path traversal
+    let canonical_path = path.canonicalize()
+        .map_err(|e| format!("Invalid path: {}", e))?;
+
+    // Security: Ensure path is within user's home directory
+    if let Some(home_dir) = dirs::home_dir() {
+        if !canonical_path.starts_with(&home_dir) {
+            return Err("Access denied: path outside home directory".to_string());
+        }
+    }
+
+    #[cfg(debug_assertions)]
     println!("DEBUG: upload_file called for path: {}, target: {}", file_path, target_key);
 
     // Reset cancellation flag at start of upload
@@ -478,11 +544,14 @@ pub async fn upload_file(
 
     // Get unique target key (auto-increment if file exists)
     let target_key = get_unique_key(&client, &bucket, &target_key).await;
+    #[cfg(debug_assertions)]
     println!("DEBUG: Final target key: {}", target_key);
 
-    let path = std::path::Path::new(&file_path);
+    // Use the validated canonical path
+    let path = &canonical_path;
 
     if path.is_dir() {
+        #[cfg(debug_assertions)]
         println!("DEBUG: Path is directory. Starting recursive walk.");
         use walkdir::WalkDir;
 
@@ -840,7 +909,9 @@ pub async fn create_s3_folder(
     path: String,
     state: State<'_, AppState>
 ) -> Result<(), String> {
+    #[cfg(debug_assertions)]
     println!("DEBUG: create_s3_folder called for bucket: {}, path: {}", bucket, path);
+
     let guard = state.client.lock().await;
     let client = guard.as_ref().ok_or("Not connected")?;
 
@@ -853,7 +924,9 @@ pub async fn create_s3_folder(
         .await
         .map_err(|e| e.to_string())?;
 
+    #[cfg(debug_assertions)]
     println!("DEBUG: Created folder object: {}", folder_key);
+
     Ok(())
 }
 
@@ -863,6 +936,10 @@ pub async fn delete_object(
     key: String,
     state: State<'_, AppState>
 ) -> Result<(), String> {
+    // Security: Validate inputs
+    validate_bucket_name(&bucket)?;
+    validate_s3_key(&key)?;
+
     let guard = state.client.lock().await;
     let client = guard.as_ref().ok_or("Not connected")?;
 
@@ -913,7 +990,9 @@ pub async fn move_to_trash(
         .await
         .map_err(|e| format!("Failed to delete original: {}", e))?;
 
+    #[cfg(debug_assertions)]
     println!("DEBUG: Moved {} to trash as {}", key, trash_key);
+
     Ok(())
 }
 
@@ -977,7 +1056,27 @@ pub async fn download_file(
 
     // Use provided save_path or default to Downloads with auto-increment
     let final_path = if let Some(path) = save_path {
-        std::path::PathBuf::from(path)
+        let save_path = std::path::PathBuf::from(&path);
+
+        // Security: Validate save path is within user's home directory
+        // Get parent directory and canonicalize it (file doesn't exist yet)
+        let parent = save_path.parent()
+            .ok_or("Invalid save path: no parent directory")?;
+
+        if !parent.exists() {
+            return Err("Save directory does not exist".to_string());
+        }
+
+        let canonical_parent = parent.canonicalize()
+            .map_err(|e| format!("Invalid save path: {}", e))?;
+
+        if let Some(home_dir) = dirs::home_dir() {
+            if !canonical_parent.starts_with(&home_dir) {
+                return Err("Access denied: save path outside home directory".to_string());
+            }
+        }
+
+        canonical_parent.join(save_path.file_name().ok_or("Invalid filename")?)
     } else {
         let download_dir = app.path().download_dir().map_err(|e| e.to_string())?;
 
@@ -1042,7 +1141,26 @@ pub async fn download_folder(
 
     // Use provided save_path or default to Downloads with auto-increment
     let zip_path = if let Some(path) = save_path {
-        std::path::PathBuf::from(path)
+        let save_path = std::path::PathBuf::from(&path);
+
+        // Security: Validate save path is within user's home directory
+        let parent = save_path.parent()
+            .ok_or("Invalid save path: no parent directory")?;
+
+        if !parent.exists() {
+            return Err("Save directory does not exist".to_string());
+        }
+
+        let canonical_parent = parent.canonicalize()
+            .map_err(|e| format!("Invalid save path: {}", e))?;
+
+        if let Some(home_dir) = dirs::home_dir() {
+            if !canonical_parent.starts_with(&home_dir) {
+                return Err("Access denied: save path outside home directory".to_string());
+            }
+        }
+
+        canonical_parent.join(save_path.file_name().ok_or("Invalid filename")?)
     } else {
         let download_dir = app.path().download_dir().map_err(|e| e.to_string())?;
 
@@ -1150,7 +1268,25 @@ pub async fn download_files_as_zip(
         return Err("No files selected".to_string());
     }
 
-    let zip_path = std::path::PathBuf::from(&save_path);
+    // Security: Validate save path is within user's home directory
+    let save_path_buf = std::path::PathBuf::from(&save_path);
+    let parent = save_path_buf.parent()
+        .ok_or("Invalid save path: no parent directory")?;
+
+    if !parent.exists() {
+        return Err("Save directory does not exist".to_string());
+    }
+
+    let canonical_parent = parent.canonicalize()
+        .map_err(|e| format!("Invalid save path: {}", e))?;
+
+    if let Some(home_dir) = dirs::home_dir() {
+        if !canonical_parent.starts_with(&home_dir) {
+            return Err("Access denied: save path outside home directory".to_string());
+        }
+    }
+
+    let zip_path = canonical_parent.join(save_path_buf.file_name().ok_or("Invalid filename")?);
     let total_files = keys.len();
 
     // First pass: get total size of all files
@@ -1261,6 +1397,16 @@ pub async fn download_files_to_folder(
     let folder = std::path::PathBuf::from(&folder_path);
     if !folder.exists() {
         return Err("Destination folder does not exist".to_string());
+    }
+
+    // Security: Validate folder is within user's home directory
+    let canonical_folder = folder.canonicalize()
+        .map_err(|e| format!("Invalid folder path: {}", e))?;
+
+    if let Some(home_dir) = dirs::home_dir() {
+        if !canonical_folder.starts_with(&home_dir) {
+            return Err("Access denied: folder outside home directory".to_string());
+        }
     }
 
     let total_files = keys.len();
@@ -1399,6 +1545,13 @@ pub async fn move_files(
     target_folder: String,
     state: State<'_, AppState>
 ) -> Result<u32, String> {
+    // Security: Validate inputs
+    validate_bucket_name(&bucket)?;
+    validate_s3_key(&target_folder)?;
+    for key in &keys {
+        validate_s3_key(key)?;
+    }
+
     let guard = state.client.lock().await;
     let client = guard.as_ref().ok_or("Not connected")?;
 
@@ -1449,6 +1602,7 @@ pub async fn move_files(
             .map_err(|e| format!("Failed to delete original {}: {}", key, e))?;
 
         moved_count += 1;
+        #[cfg(debug_assertions)]
         println!("DEBUG: Moved {} to {}", key, target_key);
     }
 
@@ -1462,6 +1616,10 @@ pub async fn rename_object(
     new_name: String,
     state: State<'_, AppState>
 ) -> Result<String, String> {
+    // Security: Validate inputs
+    validate_bucket_name(&bucket)?;
+    validate_s3_key(&old_key)?;
+
     let guard = state.client.lock().await;
     let client = guard.as_ref().ok_or("Not connected")?;
 
@@ -1558,6 +1716,7 @@ pub async fn rename_object(
         let encoded_key = urlencoding::encode(&old_key);
         let copy_source = format!("/{}/{}", bucket, encoded_key);
 
+        #[cfg(debug_assertions)]
         println!("DEBUG rename: old_key={}, new_key={}, copy_source={}", old_key, new_key, copy_source);
 
         let copy_result = client.client.copy_object()
@@ -1568,6 +1727,7 @@ pub async fn rename_object(
             .await;
 
         if let Err(e) = &copy_result {
+            #[cfg(debug_assertions)]
             println!("DEBUG rename copy error: {:?}", e);
             return Err(format!("Failed to copy: {}", e));
         }
@@ -1580,7 +1740,9 @@ pub async fn rename_object(
             .map_err(|e| format!("Failed to delete original: {}", e))?;
     }
 
+    #[cfg(debug_assertions)]
     println!("DEBUG: Renamed {} to {}", old_key, new_key);
+
     Ok(new_key)
 }
 
@@ -1653,10 +1815,15 @@ pub async fn get_presigned_url(
     expires_in_secs: Option<u64>,
     state: State<'_, AppState>
 ) -> Result<String, String> {
+    // Security: Validate inputs
+    validate_bucket_name(&bucket)?;
+    validate_s3_key(&key)?;
+
     let guard = state.client.lock().await;
     let client = guard.as_ref().ok_or("Not connected")?;
 
-    let expires_in = Duration::from_secs(expires_in_secs.unwrap_or(3600)); // Default 1 hour
+    // Security: Shorter default expiration (15 minutes) to limit URL exposure
+    let expires_in = Duration::from_secs(expires_in_secs.unwrap_or(900));
     let presigning_config = PresigningConfig::expires_in(expires_in)
         .map_err(|e| e.to_string())?;
 
